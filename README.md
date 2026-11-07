@@ -29,6 +29,33 @@ VP8/VP9/Opus 的 webm、Vorbis/Opus 的 ogg、mp3、wav、flac 等；HEVC、AV1
 （每个窗口都远低于 Host 的 `maxBytes` 上限），拼接成 `Blob` 后交给原生
 `<video>` / `<audio>` 播放。因此可以打开远超 32 MB 的文件。
 
+## 编码兼容与自动转码（HEVC/H.265）
+
+很多相机/手机导出的 `.mp4` 是 **HEVC/H.265**，Chromium/Electron 没有内置
+解码器，原生 `<video>` 会报「浏览器无法播放该文件的音视频编码」。
+
+插件的 Host 端因此提供了一条带 **HTTP Range** 的认证路由：
+
+```
+GET /api/media-preview/transcode?path=<绝对路径>
+```
+
+- 用 `ffprobe` 探测编码（按 路径+大小+mtime 缓存）；
+- 若视频/音频编码浏览器可解（h264 / vp8 / vp9 / av1 / aac / mp3 / opus /
+  vorbis / flac …）→ 直接以 Range 方式回源文件（可秒开、可拖动进度）；
+- 否则用 `ffmpeg` **转码一次**为 H.264/AAC 的 MP4（缓存到临时目录），再以
+  Range 方式回放（可拖动进度）。
+
+前端先尝试原生直读；若 `<video>`/`<audio>` 触发解码错误，则自动切换到该
+转码路由，无需手动操作。转码有缓存，同一个文件只转一次。
+
+**环境要求**：系统需能调用 `ffmpeg` 与 `ffprobe`（自动探测
+`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`；macOS 可用
+`brew install ffmpeg` 安装）。
+
+> 注意：Host 端路由属于新的 Host 代码，首次安装/更新后需**完全退出并重开
+> dsh** 才能加载；客户端改动会由 `dsh-client-hmr` 自动热更。
+
 ## 限制
 
 - 单文件内联预览上限 **512 MB**（客户端内存保护），超过时提示改用系统应用打开。

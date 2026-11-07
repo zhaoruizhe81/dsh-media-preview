@@ -125,6 +125,8 @@ window.__ModuleLoader__.load({
 
         const [state, setState] = React.useState({ status: 'loading' });
         const urlRef = React.useRef(undefined);
+        const [srcMode, setSrcMode] = React.useState('direct');
+        const [mediaReady, setMediaReady] = React.useState(false);
 
         React.useEffect(
           () => () => {
@@ -145,6 +147,8 @@ window.__ModuleLoader__.load({
           let cancelled = false;
           const controller = new AbortController();
           setState({ status: 'loading' });
+          setSrcMode('direct');
+          setMediaReady(false);
 
           (async () => {
             try {
@@ -211,7 +215,26 @@ window.__ModuleLoader__.load({
           return shell(h('p', { className: 'dmp-status' }, t('loading')));
         }
 
-        const onError = () => setState({ status: 'codec' });
+        const transcodeUrl =
+          absolutePath !== undefined
+            ? new URL(
+                `api/media-preview/transcode?path=${encodeURIComponent(absolutePath)}&v=${encodeURIComponent(String(version ?? ''))}`,
+                document.baseURI,
+              ).href
+            : undefined;
+        const activeSrc = srcMode === 'transcode' && transcodeUrl !== undefined ? transcodeUrl : state.url;
+        const handleError = () => {
+          if (srcMode !== 'transcode' && transcodeUrl !== undefined) {
+            setSrcMode('transcode');
+            setMediaReady(false);
+          } else {
+            setState({ status: 'codec' });
+          }
+        };
+        const onReady = () => setMediaReady(true);
+        const overlay =
+          srcMode === 'transcode' && !mediaReady ? h('p', { className: 'dmp-status' }, t('transcoding')) : null;
+
         if (kind === 'video') {
           return shell(
             h(
@@ -219,13 +242,16 @@ window.__ModuleLoader__.load({
               { className: 'dmp-video-frame' },
               h('video', {
                 className: 'dmp-video',
-                src: state.url,
+                src: activeSrc,
                 controls: true,
                 playsInline: true,
                 preload: 'metadata',
-                onError,
+                onError: handleError,
+                onCanPlay: onReady,
+                onLoadedData: onReady,
               }),
             ),
+            overlay,
           );
         }
         return shell(
@@ -236,12 +262,15 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dmp-audio-name', title: name || undefined }, name || t('audioTitle')),
             h('audio', {
               className: 'dmp-audio',
-              src: state.url,
+              src: activeSrc,
               controls: true,
               preload: 'metadata',
-              onError,
+              onError: handleError,
+              onCanPlay: onReady,
+              onLoadedData: onReady,
             }),
           ),
+          overlay,
         );
       };
     }
@@ -266,6 +295,7 @@ window.__ModuleLoader__.load({
                 videoTitle: 'Video',
                 audioTitle: 'Audio',
                 loading: 'Loading media…',
+                transcoding: 'Preparing video… (transcoding unsupported codec)',
                 failed: 'This media file could not be loaded.',
                 tooLarge: 'This media file is too large to preview inline (over 512 MB). Open it in a system app.',
                 unsupportedCodec: 'The browser cannot play this file’s audio/video codec. Try opening it in a system app.',
@@ -274,6 +304,7 @@ window.__ModuleLoader__.load({
                 videoTitle: '视频',
                 audioTitle: '音频',
                 loading: '正在加载媒体…',
+                transcoding: '正在准备视频…（该编码需转码）',
                 failed: '无法加载该媒体文件。',
                 tooLarge: '该媒体文件过大，无法内嵌预览（超过 512 MB），请用系统应用打开。',
                 unsupportedCodec: '浏览器无法播放该文件的音视频编码，建议用系统应用打开。',
