@@ -7,9 +7,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zhaoruizhe81-bot/dsh-media-preview.git"
+    "url": "git+https://github.com/zhaoruizhe81/dsh-media-preview.git"
   },
-  "homepage": "https://github.com/zhaoruizhe81-bot/dsh-media-preview#readme",
+  "homepage": "https://github.com/zhaoruizhe81/dsh-media-preview#readme",
   "keywords": [
     "dsh",
     "deepseek-harness",
