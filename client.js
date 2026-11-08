@@ -3,19 +3,22 @@
  *
  * Registers two document-preview implementations with the shipped
  * `@deepseek-ai/dsh-client-ui-sidebar-documentpreview` registry:
- *   - a video player for common web-playable video containers
- *   - an audio player for common web-playable audio containers
+ *   - a video player for common video containers
+ *   - an audio player for common audio containers
  *
- * Media files are frequently larger than the document preview's single-read
- * byte cap (default 32 MB). The body therefore registers in `renderer` loading
- * mode (the owner does not read the file for us) and streams the file itself in
- * bounded byte windows through the existing `workspaceFiles.readBytes` range
- * Remote, reassembling the windows into a Blob URL handed to a native
- * <video> / <audio> element. This keeps every individual read under the Host's
- * window cap and lets the tab open files larger than the complete-read cap.
+ * Playback source:
+ *   The body asks the Host route `/api/media-preview/transcode?path=...`, which
+ *   probes the codec with ffprobe and returns either the original file (when the
+ *   codec is browser-playable) or a cached H.264/AAC transcode (e.g. for
+ *   HEVC/H.265). The whole response is fetched into a Blob and mounted through
+ *   `URL.createObjectURL`, so the element owns the complete file and the progress
+ *   bar can seek instantly and reliably (independent of how the Electron custom
+ *   protocol handles HTTP Range on a direct <video src>).
  *
- * The body still requires the file's absolute Host path (from resource
- * metadata) and supports seeking within the assembled Blob.
+ *   If that route is unavailable (older Host without the route), the body falls
+ *   back to reading the file in bounded byte windows through
+ *   `workspaceFiles.readBytes` and assembling the same kind of Blob, which also
+ *   bypasses the document preview's 32 MB single-read cap.
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-media-preview',
@@ -52,7 +55,7 @@ window.__ModuleLoader__.load({
       weba: 'audio/webm',
     };
 
-    /** Byte window per Remote read; must not exceed the workspace-files page cap (2 MiB default). */
+    /** Byte window per fallback Remote read; must not exceed the workspace-files page cap (2 MiB default). */
     const CHUNK_BYTES = 1024 * 1024;
     /** Client-side ceiling for the assembled Blob; larger media should use a system player. */
     const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
@@ -125,8 +128,6 @@ window.__ModuleLoader__.load({
 
         const [state, setState] = React.useState({ status: 'loading' });
         const urlRef = React.useRef(undefined);
-        const [srcMode, setSrcMode] = React.useState('direct');
-        const [mediaReady, setMediaReady] = React.useState(false);
 
         React.useEffect(
           () => () => {
@@ -147,10 +148,43 @@ window.__ModuleLoader__.load({
           let cancelled = false;
           const controller = new AbortController();
           setState({ status: 'loading' });
-          setSrcMode('direct');
-          setMediaReady(false);
+
+          const publish = (blob) => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            if (urlRef.current !== undefined) URL.revokeObjectURL(urlRef.current);
+            urlRef.current = url;
+            setState({ status: 'ready', url });
+            if (content && typeof content.loaded === 'function') content.loaded(version);
+          };
 
           (async () => {
+            // Primary: authenticated Host route returns a playable (possibly transcoded) file.
+            const routePath = `api/media-preview/transcode?path=${encodeURIComponent(absolutePath)}&v=${encodeURIComponent(String(version ?? ''))}`;
+            const absUrl = new URL(routePath, document.baseURI).href;
+            const transport = globalThis.__DSH_TRANSPORT__;
+            try {
+              let response;
+              if (transport && typeof transport.fetch === 'function') {
+                try {
+                  response = await transport.fetch(routePath, { signal: controller.signal });
+                } catch (transportError) {
+                  response = undefined;
+                }
+              }
+              if (response === undefined) {
+                response = await fetch(absUrl, { signal: controller.signal });
+              }
+              if (!response || !response.ok) throw new Error(`media route answered ${response ? response.status : 'no response'}`);
+              const blob = await response.blob();
+              publish(blob);
+              return;
+            } catch (error) {
+              if (cancelled) return;
+              // Fall through to bounded Remote reads when the route is unavailable.
+            }
+
+            // Fallback: read the raw file in bounded windows and assemble a Blob.
             try {
               const chunks = [];
               let offset = 0;
@@ -172,13 +206,7 @@ window.__ModuleLoader__.load({
                 guard += 1;
                 if (guard > 200000) break;
               }
-              if (cancelled) return;
-              const blob = new Blob(chunks, { type: mime });
-              const url = URL.createObjectURL(blob);
-              if (urlRef.current !== undefined) URL.revokeObjectURL(urlRef.current);
-              urlRef.current = url;
-              setState({ status: 'ready', url });
-              if (content && typeof content.loaded === 'function') content.loaded(version);
+              publish(new Blob(chunks, { type: mime }));
             } catch (error) {
               if (cancelled) return;
               if (content && typeof content.failed === 'function') content.failed();
@@ -192,8 +220,8 @@ window.__ModuleLoader__.load({
           };
         }, [absolutePath, declaredSize, mime, version, revision]);
 
-        const shell = (children, state2) =>
-          h('div', { className: 'dmp-root', 'data-media-preview': kind }, h('style', null, CSS), children, state2);
+        const shell = (children, extra) =>
+          h('div', { className: 'dmp-root', 'data-media-preview': kind }, h('style', null, CSS), children, extra);
 
         if (absolutePath === undefined) {
           return shell(
@@ -215,26 +243,7 @@ window.__ModuleLoader__.load({
           return shell(h('p', { className: 'dmp-status' }, t('loading')));
         }
 
-        const transcodeUrl =
-          absolutePath !== undefined
-            ? new URL(
-                `api/media-preview/transcode?path=${encodeURIComponent(absolutePath)}&v=${encodeURIComponent(String(version ?? ''))}`,
-                document.baseURI,
-              ).href
-            : undefined;
-        const activeSrc = srcMode === 'transcode' && transcodeUrl !== undefined ? transcodeUrl : state.url;
-        const handleError = () => {
-          if (srcMode !== 'transcode' && transcodeUrl !== undefined) {
-            setSrcMode('transcode');
-            setMediaReady(false);
-          } else {
-            setState({ status: 'codec' });
-          }
-        };
-        const onReady = () => setMediaReady(true);
-        const overlay =
-          srcMode === 'transcode' && !mediaReady ? h('p', { className: 'dmp-status' }, t('transcoding')) : null;
-
+        const onError = () => setState({ status: 'codec' });
         if (kind === 'video') {
           return shell(
             h(
@@ -242,16 +251,13 @@ window.__ModuleLoader__.load({
               { className: 'dmp-video-frame' },
               h('video', {
                 className: 'dmp-video',
-                src: activeSrc,
+                src: state.url,
                 controls: true,
                 playsInline: true,
                 preload: 'metadata',
-                onError: handleError,
-                onCanPlay: onReady,
-                onLoadedData: onReady,
+                onError,
               }),
             ),
-            overlay,
           );
         }
         return shell(
@@ -262,15 +268,12 @@ window.__ModuleLoader__.load({
             h('div', { className: 'dmp-audio-name', title: name || undefined }, name || t('audioTitle')),
             h('audio', {
               className: 'dmp-audio',
-              src: activeSrc,
+              src: state.url,
               controls: true,
               preload: 'metadata',
-              onError: handleError,
-              onCanPlay: onReady,
-              onLoadedData: onReady,
+              onError,
             }),
           ),
-          overlay,
         );
       };
     }
@@ -295,7 +298,6 @@ window.__ModuleLoader__.load({
                 videoTitle: 'Video',
                 audioTitle: 'Audio',
                 loading: 'Loading media…',
-                transcoding: 'Preparing video… (transcoding unsupported codec)',
                 failed: 'This media file could not be loaded.',
                 tooLarge: 'This media file is too large to preview inline (over 512 MB). Open it in a system app.',
                 unsupportedCodec: 'The browser cannot play this file’s audio/video codec. Try opening it in a system app.',
@@ -304,7 +306,6 @@ window.__ModuleLoader__.load({
                 videoTitle: '视频',
                 audioTitle: '音频',
                 loading: '正在加载媒体…',
-                transcoding: '正在准备视频…（该编码需转码）',
                 failed: '无法加载该媒体文件。',
                 tooLarge: '该媒体文件过大，无法内嵌预览（超过 512 MB），请用系统应用打开。',
                 unsupportedCodec: '浏览器无法播放该文件的音视频编码，建议用系统应用打开。',

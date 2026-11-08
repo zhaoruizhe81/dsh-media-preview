@@ -46,8 +46,10 @@ GET /api/media-preview/transcode?path=<绝对路径>
 - 否则用 `ffmpeg` **转码一次**为 H.264/AAC 的 MP4（缓存到临时目录），再以
   Range 方式回放（可拖动进度）。
 
-前端先尝试原生直读；若 `<video>`/`<audio>` 触发解码错误，则自动切换到该
-转码路由，无需手动操作。转码有缓存，同一个文件只转一次。
+前端（客户端）会把该路由返回的整段内容抓取为 `Blob`，再用
+`URL.createObjectURL` 交给 `<video>` / `<audio>` 播放。因为播放器拿到的是
+完整文件，**进度条可以瞬间拖动、定位**（不依赖 Electron 自定义协议对
+HTTP Range 的转发）。路由内部按需转码，转码结果有缓存，同一个文件只转一次。
 
 **环境要求**：系统需能调用 `ffmpeg` 与 `ffprobe`（自动探测
 `/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`；macOS 可用
